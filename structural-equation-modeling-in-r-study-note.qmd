@@ -994,5 +994,5 @@ UCLA Statistical Methods and Data Analytics. n.d. "Introduction to Structural Eq
 
 # Appendix: Publication Links
 
-- [GitHub Repository](https://github.com/rsabilla/structural-equation-modeling-in-r-study-note)
-- [GitHub Pages Website](https://rsabilla.github.io/structural-equation-modeling-in-r-study-note/structural-equation-modeling-in-r-study-note.html)
+- [GitHub Repository](https://github.com/rsabilla/M13---Study-Note-SEM-in-R-with-lavaan)
+- [GitHub Pages Website](https://rsabilla.github.io/M13---Study-Note-SEM-in-R-with-lavaan/structural-equation-modeling-in-r-study-note.html)
