@@ -1,0 +1,998 @@
+---
+title: "Structural Equation Modeling in R: Study Note"
+author: "Ron Stephen Sabilla"
+date: today
+format:
+  html:
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 3
+    number-sections: true
+    smooth-scroll: true
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Introduction
+
+## Purpose of the Assignment
+
+This is my study note for the UCLA OARC seminar *Introduction to Structural Equation Modeling (SEM) in R with lavaan*. I coded along with the video, ran every model on the `worland5.csv` data, and wrote down what each piece of syntax means, what each model is estimating, and how to read the output. The goal is a reference I can come back to the next time I have to build or review an SEM.
+
+The seminar moves in a logical order: simple regression → multiple regression → multivariate regression → path analysis → model fit → measurement models → structural regression models. Each step adds one new idea on top of the last one, and this note follows the same order.
+
+## What Is Structural Equation Modeling?
+
+Structural equation modeling is a general framework for testing a *theory about how a set of variables relate to each other*. Instead of fitting one outcome at a time, SEM fits a whole system of equations at once. Those equations can include:
+
+- regression paths between observed variables,
+- latent variables (constructs we can't measure directly) defined by several indicators,
+- regression paths between latent variables,
+- variances and covariances among everything in the model.
+
+The core idea is simple: every SEM implies a specific covariance matrix. If the model is right, the covariance matrix it implies, Σ(θ), should look a lot like the covariance matrix we actually observe in the data, S. Model fit is basically a measure of how close those two matrices are.
+
+## Relationship to Regression and CFA
+
+SEM isn't a separate technique so much as an umbrella. Many familiar models are special cases of it:
+
+| Model | What it is in SEM terms |
+|---|---|
+| Simple / multiple regression | One endogenous observed variable, observed predictors |
+| Multivariate regression | Several endogenous observed variables, observed predictors |
+| Path analysis | Observed variables can predict *each other* (endogenous → endogenous) |
+| Confirmatory factor analysis (CFA) | Measurement model only: latent factors and their indicators |
+| Structural regression model | Measurement model + regression paths among latent variables |
+
+My previous CFA assignment covered the measurement side. The SEM seminar adds the structural side, where latent variables predict other latent variables.
+
+# Data and Software
+
+## Required Packages
+
+```{r}
+#| label: setup-install
+#| eval: false
+# Run once in the console (not every time the document renders)
+install.packages("lavaan", dependencies = TRUE)
+```
+
+```{r}
+#| label: setup-load
+library(lavaan)  # SEM estimation: sem(), cfa(), fitMeasures(), modindices()
+
+# Small helper functions so the text below can pull numbers straight
+# from the fitted models (keeps the write-up in sync with the output)
+pe <- function(fit, lhs, op, rhs, col = "est") {
+  p <- parameterEstimates(fit, standardized = TRUE)
+  round(p[p$lhs == lhs & p$op == op & p$rhs == rhs, col][1], 3)
+}
+fm <- function(fit, m, digits = 3) round(unname(fitMeasures(fit, m)), digits)
+```
+
+## Importing the Data
+
+The seminar uses a hypothetical data set of N = 500 students with nine observed variables.
+
+```{r}
+#| label: data-import
+# Read the data directly from the UCLA website
+dat <- read.csv(
+  "https://stats.idre.ucla.edu/wp-content/uploads/2021/02/worland5.csv"
+)
+```
+
+| Variable | Meaning | Proposed latent construct |
+|---|---|---|
+| `motiv` | Motivation | Adjustment |
+| `harm` | Harmony | Adjustment |
+| `stabi` | Stability | Adjustment |
+| `ppsych` | Negative parental psychology | Risk |
+| `ses` | Socioeconomic status | Risk |
+| `verbal` | Verbal IQ | Risk |
+| `read` | Reading | Achievement |
+| `arith` | Arithmetic | Achievement |
+| `spell` | Spelling | Achievement |
+
+## Examining the Data
+
+```{r}
+#| label: data-structure
+str(dat)    # 500 rows, 9 numeric columns
+head(dat)   # first six students
+```
+
+```{r}
+#| label: data-summary
+# Means and variances: every variable is centered at 0 with variance ~100
+round(sapply(dat, function(x) c(mean = mean(x), var = var(x), sd = sd(x))), 2)
+```
+
+All nine variables were simulated to have a mean of 0 and a variance of about 100. That's why the intercepts in the regression models below come out essentially zero.
+
+```{r}
+#| label: data-cov
+# Sample covariance matrix S
+round(cov(dat), 2)
+```
+
+```{r}
+#| label: data-cor
+# Correlation matrix (easier to read than covariances)
+round(cor(dat), 2)
+```
+
+A few things stand out in the correlations. The three achievement variables (`read`, `arith`, `spell`) correlate strongly with each other, and so do the three adjustment variables (`motiv`, `harm`, `stabi`). `ppsych` correlates *negatively* with almost everything, which makes sense since it measures a negative trait. That's an early hint that it will load negatively on the Risk factor compared with `ses` and `verbal`.
+
+### Σ vs. S vs. Σ(θ)
+
+These three matrices show up everywhere in SEM, so it's worth being precise:
+
+- **Σ (population covariance matrix):** the true covariances among the variables in the entire population. We never actually see it.
+- **S (sample covariance matrix):** the covariances we compute from our data, like `cov(dat)` above. It's our estimate of Σ, which is why it's sometimes written $\hat{\Sigma}$.
+- **Σ(θ) (model-implied covariance matrix):** the covariance matrix that our model *reproduces* from its parameter estimates θ (the loadings, paths, variances, etc.). Once estimated, it's written $\Sigma(\hat{\theta})$.
+
+The fundamental hypothesis of SEM is $\Sigma = \Sigma(\theta)$. In practice we test it by comparing S with $\Sigma(\hat{\theta})$. The difference $S - \Sigma(\hat{\theta})$ is the **residual covariance matrix**, and the smaller those residuals are, the better the model fits.
+
+# SEM Concepts
+
+## Observed and Latent Variables
+
+- **Observed variable (manifest variable):** something actually measured and in the data set. In the path diagrams it's drawn as a square. *Example:* `motiv`, `read`.
+- **Latent variable (factor):** a construct that isn't measured directly but is inferred from several observed variables. Drawn as a circle. *Example:* `adjust`, `risk`, `achieve`.
+- **Indicator:** an observed variable used to measure a latent variable. *Example:* `read`, `arith`, and `spell` are indicators of `achieve`.
+- **Factor:** another word for a latent variable in a measurement model.
+- **Loading:** the regression coefficient from a factor to one of its indicators. It shows how strongly the indicator reflects the factor. *Example:* the coefficient on `arith` in `achieve =~ read + arith + spell`.
+
+## Exogenous and Endogenous Variables
+
+- **Exogenous variable:** not predicted by anything else in the model. Its causes are outside the model, so it has no incoming single-headed arrows. *Example:* `adjust` and `risk` in the structural model below.
+- **Endogenous variable:** predicted by at least one other variable in the model, so at least one arrow points at it. *Example:* `achieve` is an endogenous latent variable when it's predicted by `adjust` and `risk`. `read` is an endogenous observed variable in the regression `read ~ motiv`.
+
+Note that indicators are technically always "dependent" (the factor points to them), but the LISREL labels x-side vs. y-side depend on whether the *factor* is exogenous (ξ, x-indicators) or endogenous (η, y-indicators).
+
+## Measurement and Structural Models
+
+- **Measurement model:** the part of the SEM that links latent variables to their indicators. `achieve =~ read + arith + spell` defines a measurement model.
+- **Structural model:** the part that specifies regression relationships among latent variables (or between latent and observed constructs). `achieve ~ adjust + risk` defines a structural regression model.
+- **Regression path:** a directed relationship where one variable predicts another (single-headed arrow). *Example:* `read ~ motiv`.
+- **Residual:** the part of an endogenous variable (or indicator) that the model doesn't explain. Its variance is the **residual variance**, written `.read` in lavaan output. Residuals are ζ for endogenous variables, δ/ε for indicators.
+- **Intercept:** the predicted value of a variable when all its predictors equal 0, requested with `~ 1`. *Example:* `read ~ 1`.
+- **Covariance:** an undirected association between two variables (double-headed arrow), with no claim about which one causes the other. *Example:* `motiv ~~ harm`, or `adjust ~~ risk`.
+
+## Path Diagrams
+
+Path diagrams are the visual language of SEM:
+
+| Symbol | Meaning |
+|---|---|
+| Square / rectangle | Observed variable |
+| Circle / oval | Latent variable |
+| Single-headed arrow → | Regression path or factor loading |
+| Double-headed arrow ↔ | Variance (to itself) or covariance (between two variables) |
+| Small arrow with no source | Residual / disturbance |
+
+Here's the full theoretical model from the seminar. Each factor's measurement model is on the outside, and the structural paths are in the middle:
+
+```{mermaid}
+flowchart LR
+  ADJ((Adjustment)) --> motiv[motiv]
+  ADJ --> harm[harm]
+  ADJ --> stabi[stabi]
+  RISK((Risk)) --> ppsych[ppsych]
+  RISK --> ses[ses]
+  RISK --> verbal[verbal]
+  ADJ ==> ACH((Achievement))
+  RISK ==> ACH
+  ADJ <-.-> RISK
+  ACH --> read[read]
+  ACH --> arith[arith]
+  ACH --> spell[spell]
+```
+
+*Thin arrows are factor loadings (measurement), thick arrows are structural regression paths, and the dotted double arrow is the covariance between the two exogenous factors.*
+
+## Matrix Notation
+
+The seminar uses LISREL notation. The pieces I need to know:
+
+**Observed-variable models (regression / path analysis):**
+
+$$
+\mathbf{y} = \boldsymbol{\alpha} + \mathbf{\Gamma}\mathbf{x} + \mathbf{B}\mathbf{y} + \boldsymbol{\zeta}
+$$
+
+- $\mathbf{y}$: endogenous observed variables, $\mathbf{x}$: exogenous observed variables
+- $\boldsymbol{\alpha}$: intercepts
+- $\mathbf{\Gamma}$ (gamma): paths from exogenous to endogenous variables. $\gamma_{12}$ means y₁ regressed on x₂ (row = endogenous, column = exogenous)
+- $\mathbf{B}$ (beta): paths among endogenous variables. $\beta_{21}$ is the path *from* y₁ *to* y₂. Its diagonal is always 0 (a variable can't predict itself)
+- $\boldsymbol{\zeta}$: residuals, with covariance matrix $\mathbf{\Psi}$ (psi). $\psi_{11}$ is the residual variance of y₁
+- $\mathbf{\Phi}$ (phi): variances/covariances of the exogenous variables
+
+**Measurement models:**
+
+$$
+\mathbf{x} = \boldsymbol{\tau}_x + \mathbf{\Lambda}_x \boldsymbol{\xi} + \boldsymbol{\delta}
+\qquad
+\mathbf{y} = \boldsymbol{\tau}_y + \mathbf{\Lambda}_y \boldsymbol{\eta} + \boldsymbol{\epsilon}
+$$
+
+- $\boldsymbol{\xi}$ (xi): exogenous latent variables, $\boldsymbol{\eta}$ (eta): endogenous latent variables
+- $\mathbf{\Lambda}$ (lambda): factor loadings
+- $\boldsymbol{\delta}, \boldsymbol{\epsilon}$: indicator residuals, with variances in $\mathbf{\Theta}_\delta, \mathbf{\Theta}_\epsilon$
+
+**Structural model (latent variables):**
+
+$$
+\boldsymbol{\eta} = \boldsymbol{\alpha} + \mathbf{B}\boldsymbol{\eta} + \mathbf{\Gamma}\boldsymbol{\xi} + \boldsymbol{\zeta}
+$$
+
+Same Γ and B idea as before, but now the variables are latent.
+
+# lavaan Syntax
+
+lavaan model syntax is a text string where each line is one relationship. The operators map directly onto arrows in a path diagram:
+
+| Operator | Meaning | Example | Path-diagram equivalent |
+|---|---|---|---|
+| `~` | Regression / prediction ("is regressed on") | `read ~ motiv` | Single arrow from `motiv` to `read` (Γ or B) |
+| `=~` | Latent variable measured by indicators ("is measured by") | `adjust =~ motiv + harm + stabi` | Arrows from the circle `adjust` to each square (Λ) |
+| `~~` | Variance or covariance | `motiv ~~ harm` | Double-headed arrow (Φ, Ψ, Θ) |
+| `~ 1` | Intercept or mean | `read ~ 1` | A triangle "1" pointing at the variable (α, τ) |
+| `1*` | Fixes a parameter to 1 | `f =~ 1*q01` | Arrow labeled with a fixed 1 |
+| `NA*` | Frees a parameter that would be fixed by default | `f =~ NA*q01` | Arrow whose value is estimated |
+| `a*` | Labels a parameter (so you can reuse it or build effects) | `f =~ a*q01` | Arrow named "a" |
+
+## Regression
+
+`y ~ x1 + x2` means "y is regressed on x1 and x2." The outcome goes on the left and its predictors on the right. Each term on the right becomes one regression coefficient.
+
+## Latent-Variable Definition
+
+`f =~ y1 + y2 + y3` means "factor f is measured by y1, y2, and y3." Behind the scenes, lavaan fixes the first loading to 1 (the *marker variable* method) so the factor has a scale. Using `NA*y1` frees that loading, but then you need another way to set the scale, such as `std.lv = TRUE`, which fixes the factor variance to 1.
+
+## Variances and Covariances
+
+`x ~~ x` is a variance. `x ~~ z` is a covariance. If x is endogenous, the same line refers to the *residual* variance or covariance. `x ~~ 0*z` fixes a covariance to zero.
+
+## Intercepts and Fixed Parameters
+
+`y ~ 1` asks for an intercept. Adding `1 +` inside a regression (`read ~ 1 + motiv`) does the same thing. Pre-multiplying with a number fixes the parameter (`1*`, `0*`), `NA*` frees it, and a name like `a*` labels it so you can use it in a defined parameter with `:=` (for example, an indirect effect).
+
+# Regression and Path Analysis
+
+## Simple Regression
+
+**Model type:** simple linear regression, one endogenous observed variable (`read`) and one exogenous observed variable (`motiv`).
+
+$$
+y_1 = \alpha_1 + \gamma_1 x_1 + \zeta_1
+$$
+
+```{mermaid}
+flowchart LR
+  motiv[motiv] -- "γ₁" --> read[read]
+  z((ζ₁)) --> read
+```
+
+### Using `lm()`
+
+```{r}
+#| label: m1a-lm
+# Model 1A: ordinary least squares regression
+fit1a <- lm(read ~ motiv, data = dat)
+summary(fit1a)
+```
+
+### Using lavaan
+
+```{r}
+#| label: m1b-lavaan
+# Model 1B: the same regression written as an SEM
+m1b <- '
+  read ~ 1 + motiv   # intercept + regression of read on motiv
+  motiv ~~ motiv     # variance of the exogenous predictor (estimated anyway; made explicit here)
+'
+fit1b <- sem(m1b, data = dat)
+summary(fit1b)
+```
+
+### Comparing the two
+
+| Parameter | `lm()` (least squares) | lavaan (maximum likelihood) |
+|---|---|---|
+| Slope for `motiv` (γ₁) | `r round(coef(fit1a)["motiv"], 3)` | `r pe(fit1b, "read", "~", "motiv")` |
+| Intercept (α₁) | `r signif(coef(fit1a)[1], 3)` | `r pe(fit1b, "read", "~1", "")` |
+| Residual variance (ψ₁₁) | `r round(sigma(fit1a)^2, 3)` (= `r round(sigma(fit1a), 3)`²) | `r pe(fit1b, "read", "~~", "read")` |
+| Variance of `motiv` (φ₁₁) | not reported | `r pe(fit1b, "motiv", "~~", "motiv")` |
+
+- **Regression coefficient:** for every 1-unit increase in motivation, the predicted reading score goes up by about `r pe(fit1b, "read", "~", "motiv")` units. It's identical in both approaches.
+- **Intercept:** essentially 0, because both variables are centered at 0. A student with average motivation is predicted to have an average reading score.
+- **Residual variance:** the variance in reading that motivation *doesn't* explain. It's slightly smaller in lavaan.
+- **Variance of the predictor:** lavaan treats `motiv` as part of the model, so it estimates its variance (`r pe(fit1b, "motiv", "~~", "motiv")`). `lm()` treats predictors as fixed and doesn't.
+- **Least squares vs. maximum likelihood:** `lm()` divides the residual sum of squares by $N - k - 1$ (here 498), which gives an unbiased estimate. lavaan's ML divides by $N$ (500). So ML residual variance = `r round(sigma(fit1a)^2, 3)` × 498/500 = `r round(sigma(fit1a)^2 * 498/500, 3)`, which matches the lavaan output. The coefficients are the same. Only the variance differs, and the gap shrinks as N grows.
+- **Why df = 0:** with intercepts, there are two variables, so there are 3 unique variances/covariances plus 2 means = **5 known values**. lavaan estimates 5 free parameters (γ₁, α₁, ψ₁₁, φ₁₁, and the mean of `motiv`, κ₁). That's 5 − 5 = **`r fm(fit1b, "df")` degrees of freedom**. Without intercepts it's 3 knowns vs. 3 parameters (γ₁, φ₁₁, ψ₁₁), still df = 0. Regression models are always **saturated**: they reproduce S perfectly, so there's nothing left over to test fit with.
+
+## Multiple Regression
+
+**Model type:** multiple regression, one endogenous observed variable (`read`), two exogenous observed variables (`ppsych`, `motiv`).
+
+$$
+y_1 = \alpha_1 + \gamma_{11} x_1 + \gamma_{12} x_2 + \zeta_1
+$$
+
+```{mermaid}
+flowchart LR
+  ppsych[ppsych] --> read[read]
+  motiv[motiv] --> read
+  ppsych <-.-> motiv
+  z((ζ₁)) --> read
+```
+
+```{r}
+#| label: m2
+# Model 2: multiple regression
+m2 <- '
+  read ~ 1 + ppsych + motiv   # read predicted by both exogenous variables
+  ppsych ~~ motiv             # covariance between the two predictors (default for exogenous vars)
+'
+fit2 <- sem(m2, data = dat)
+summary(fit2)
+```
+
+- **Endogenous:** `read`. **Exogenous:** `ppsych`, `motiv`.
+- **Regression paths:** `read ~ ppsych` (`r pe(fit2, "read", "~", "ppsych")`) and `read ~ motiv` (`r pe(fit2, "read", "~", "motiv")`).
+- **Covariance path:** `ppsych ~~ motiv` (`r pe(fit2, "ppsych", "~~", "motiv")`).
+- **Residual variance:** `.read` = `r pe(fit2, "read", "~~", "read")`.
+- **Free parameters:** `r fm(fit2, "npar")`, **df** = `r fm(fit2, "df")`. Still saturated.
+
+**Interpretation:** holding motivation constant, a 1-unit increase in negative parental psychology predicts a `r abs(pe(fit2, "read", "~", "ppsych"))`-unit *drop* in reading. Holding parental psychology constant, a 1-unit increase in motivation predicts a `r pe(fit2, "read", "~", "motiv")`-unit increase. The motivation coefficient shrank from `r pe(fit1b, "read", "~", "motiv")` to `r pe(fit2, "read", "~", "motiv")` because the two predictors are correlated, so part of what looked like a motivation effect was shared with parental psychology.
+
+## Multivariate Regression
+
+**Model type:** multivariate regression, *two* endogenous observed variables (`read`, `arith`) predicted by exogenous variables.
+
+$$
+\begin{aligned}
+y_1 &= \alpha_1 + \gamma_{11}x_1 + \gamma_{12}x_2 + \zeta_1 \\
+y_2 &= \alpha_2 + \gamma_{22}x_2 + \zeta_2
+\end{aligned}
+$$
+
+### Model 3A: default covariances
+
+```{mermaid}
+flowchart LR
+  ppsych[ppsych] --> read[read]
+  motiv[motiv] --> read
+  motiv --> arith[arith]
+  ppsych <-.-> motiv
+  read <-.->|residual cov| arith
+```
+
+```{r}
+#| label: m3a
+# Model 3A: multivariate regression
+m3a <- '
+  read  ~ 1 + ppsych + motiv   # equation for reading
+  arith ~ 1 + motiv            # equation for arithmetic (no ppsych path -> gamma_21 fixed to 0)
+'
+fit3a <- sem(m3a, data = dat)
+summary(fit3a)
+```
+
+lavaan *automatically* estimates a residual covariance between the two endogenous variables (`.read ~~ .arith` = `r pe(fit3a, "read", "~~", "arith")`). That's the key difference from running two separate `lm()` models.
+
+- **Endogenous:** `read`, `arith`. **Exogenous:** `ppsych`, `motiv`.
+- **Regression paths:** `read ~ ppsych`, `read ~ motiv`, `arith ~ motiv`.
+- **Covariances:** `ppsych ~~ motiv` (exogenous) and `.read ~~ .arith` (residual).
+- **Residual variances:** `.read`, `.arith`.
+- **Free parameters:** `r fm(fit3a, "npar")`, **df** = `r fm(fit3a, "df")`.
+
+**Counting df by hand:** 4 variables → 4(5)/2 = 10 variances/covariances + 4 means = 14 knowns. Parameters: 3 regressions + 2 intercepts + 2 residual variances + 1 residual covariance + 2 exogenous variances + 1 exogenous covariance + 2 exogenous means = 13. So 14 − 13 = 1 df. The one "missing" parameter is the path from `ppsych` to `arith`, which we fixed to zero by leaving it out.
+
+Why does lavaan print `r fm(fit3a, "npar")` parameters instead of 13? By default (`fixed.x = TRUE`), lavaan fixes the variances, covariance, and means of the *exogenous observed* variables to their sample values instead of estimating them. Those 5 values drop out of both the knowns (14 − 5 = 9) and the parameters (13 − 5 = 8), so df is still 9 − 8 = 1. In Models 1B and 2 I wrote the exogenous variance/covariance explicitly (`motiv ~~ motiv`, `ppsych ~~ motiv`), so lavaan counted them as free parameters there.
+
+Since df > 0, we finally get a real test of fit: χ²(`r fm(fit3a, "df")`) = `r fm(fit3a, "chisq")`, p = `r fm(fit3a, "pvalue")`. The significant p-value says fixing `arith ~ ppsych` to 0 is a poor assumption.
+
+### Model 3D: covariance removed
+
+```{r}
+#| label: m3d
+# Model 3D: same as 3A but the residual covariance is fixed to zero
+m3d <- '
+  read  ~ 1 + ppsych + motiv
+  arith ~ 1 + motiv
+  read ~~ 0*arith              # turn off the residual covariance
+'
+fit3d <- sem(m3d, data = dat)
+summary(fit3d)
+```
+
+```{r}
+#| label: m3d-lm-compare
+# Equivalent separate regressions
+coef(lm(read ~ ppsych + motiv, data = dat))
+coef(lm(arith ~ motiv, data = dat))
+```
+
+With the residual covariance fixed to 0, the lavaan coefficients match the separate `lm()` regressions. This is now the same as running two independent regressions (the residual variances still differ slightly because of ML vs. LS). We freed one fewer parameter, so df = `r fm(fit3d, "df")`, and the chi-square jumps to `r fm(fit3d, "chisq")`. Ignoring the fact that reading and arithmetic residuals are related makes the fit much worse.
+
+Notice that `arith ~ motiv` is identical with or without the residual covariance (`r pe(fit3a, "arith", "~", "motiv")` in 3A vs. `r pe(fit3d, "arith", "~", "motiv")` in 3D). Turning the covariance on only changes a coefficient when there's a predictor in the *other* equation that is missing from this one and is correlated with this predictor. Here the predictor in `arith`'s equation (`motiv`) also appears in `read`'s equation, so the covariance doesn't change it. The `read` coefficients are also the same, and what the covariance really changes is the fit (χ² `r fm(fit3a, "chisq")` vs. `r fm(fit3d, "chisq")`).
+
+### Model 3E: fully saturated multivariate regression
+
+```{r}
+#| label: m3e
+# Model 3E: both outcomes predicted by both predictors
+m3e <- '
+  read  ~ 1 + ppsych + motiv
+  arith ~ 1 + ppsych + motiv   # adding gamma_21 back in
+'
+fit3e <- sem(m3e, data = dat)
+summary(fit3e)
+```
+
+Adding `arith ~ ppsych` uses up the last degree of freedom: `r fm(fit3e, "npar")` free parameters, df = `r fm(fit3e, "df")`. The model is saturated again and reproduces S perfectly.
+
+| Model | Endogenous | Exogenous | Free params | df | χ² |
+|---|---|---|---|---|---|
+| 1B simple | read | motiv | `r fm(fit1b, "npar")` | `r fm(fit1b, "df")` | `r fm(fit1b, "chisq")` |
+| 2 multiple | read | ppsych, motiv | `r fm(fit2, "npar")` | `r fm(fit2, "df")` | `r fm(fit2, "chisq")` |
+| 3A multivariate (default cov) | read, arith | ppsych, motiv | `r fm(fit3a, "npar")` | `r fm(fit3a, "df")` | `r fm(fit3a, "chisq")` |
+| 3D multivariate (cov removed) | read, arith | ppsych, motiv | `r fm(fit3d, "npar")` | `r fm(fit3d, "df")` | `r fm(fit3d, "chisq")` |
+| 3E multivariate (saturated) | read, arith | ppsych, motiv | `r fm(fit3e, "npar")` | `r fm(fit3e, "df")` | `r fm(fit3e, "chisq")` |
+
+### Multiple vs. multivariate regression vs. SEM
+
+- **Multiple regression:** *one* outcome, *several* predictors.
+- **Multivariate regression:** *several* outcomes at once, each with its own predictors, and their residuals are allowed to covary.
+- **Structural equation modeling:** the general framework that contains both. It also allows outcomes to predict each other (path analysis) and allows variables to be latent (measurement and structural models).
+
+## Path Analysis
+
+**Model type:** path analysis with observed variables. The new ingredient is the **B matrix**: an endogenous variable (`read`) predicts another endogenous variable (`arith`).
+
+$$
+\begin{aligned}
+y_1 &= \alpha_1 + \gamma_{11}x_1 + \gamma_{12}x_2 + \zeta_1 \\
+y_2 &= \alpha_2 + \gamma_{22}x_2 + \beta_{21}y_1 + \zeta_2
+\end{aligned}
+$$
+
+```{mermaid}
+flowchart LR
+  ppsych[ppsych] -- "γ₁₁" --> read[read]
+  motiv[motiv] -- "γ₁₂" --> read
+  motiv -- "γ₂₂" --> arith[arith]
+  read -- "β₂₁" --> arith
+  ppsych <-.-> motiv
+```
+
+```{r}
+#| label: m4a
+# Model 4A: path analysis
+m4a <- '
+  read  ~ 1 + ppsych + motiv   # read is endogenous
+  arith ~ 1 + motiv + read     # arith is endogenous AND predicted by another endogenous variable
+'
+fit4a <- sem(m4a, data = dat)
+summary(fit4a, fit.measures = TRUE)
+```
+
+Path analysis extends regression by allowing:
+
+- **multiple regression paths** in one model (four here),
+- **multiple endogenous variables** (`read` and `arith`),
+- **covariances among exogenous variables** (`ppsych ~~ motiv`, estimated by default),
+- **indirect relationships**: `ppsych` and `motiv` affect `arith` *through* `read`.
+
+Note that lavaan does *not* add a residual covariance between `read` and `arith` here, since `read` already predicts `arith` directly.
+
+**What each arrow means:**
+
+- `ppsych → read` (`r pe(fit4a, "read", "~", "ppsych")`): higher negative parental psychology predicts lower reading, controlling for motivation.
+- `motiv → read` (`r pe(fit4a, "read", "~", "motiv")`): higher motivation predicts higher reading.
+- `motiv → arith` (`r pe(fit4a, "arith", "~", "motiv")`): this is the *direct* effect of motivation on arithmetic after accounting for reading. It's `r ifelse(pe(fit4a, "arith", "~", "motiv", "pvalue") < .05, "significant (p < .001)", "not significant")`.
+- `read → arith` (`r pe(fit4a, "arith", "~", "read")`): better readers score higher in arithmetic, holding motivation constant. This is the β₂₁ path.
+- `ppsych ↔ motiv` (`r pe(fit4a, "ppsych", "~~", "motiv")`): the two exogenous variables are negatively related, with no causal direction assumed.
+
+Free parameters = `r fm(fit4a, "npar")`, df = `r fm(fit4a, "df")`. The one df comes from the missing path `ppsych → arith`.
+
+# Model-Fit Statistics
+
+## Chi-Square
+
+The model chi-square tests the exact-fit hypothesis $H_0: \Sigma = \Sigma(\theta)$. ML estimation minimizes a discrepancy $F_{ML}$ between S and $\Sigma(\hat\theta)$, and $\chi^2 = N \cdot F_{ML}$ (roughly).
+
+- A **non-significant** χ² means we can't reject the model, which is what we want. It's like a "not guilty" verdict: it doesn't prove the model is true, it just fails to show it's wrong.
+- A **significant** χ² means the model-implied covariances differ from the observed ones by more than chance.
+
+For Model 4A: χ²(`r fm(fit4a, "df")`) = `r fm(fit4a, "chisq")`, p = `r fm(fit4a, "pvalue")`. Technically we reject exact fit. But χ² is very sensitive to sample size. With N = 500, even a tiny misfit can be significant, which is why we look at approximate fit indices too.
+
+### The baseline (null) model
+
+```{r}
+#| label: m4c
+# Model 4C: baseline model -- only variances, every covariance fixed to 0
+m4c <- '
+  read   ~~ read
+  ppsych ~~ ppsych
+  motiv  ~~ motiv
+  arith  ~~ arith
+'
+fit4c <- sem(m4c, data = dat)
+summary(fit4c)
+```
+
+The baseline model says *nothing is related to anything*. It's the worst reasonable model. lavaan's baseline for 4A treats `ppsych ~~ motiv` as fixed to the sample value (exogenous covariates are "fixed.x"), which is why the baseline χ² inside the 4A output is `r fm(fit4a, "baseline.chisq")` on `r fm(fit4a, "baseline.df")` df, while this fully independent model has χ² = `r fm(fit4c, "chisq")` on `r fm(fit4c, "df")` df. CFI and TLI compare our model to this baseline.
+
+## CFI and TLI
+
+Both are *incremental* fit indices: how much better is my model than the baseline?
+
+$$
+CFI = 1 - \frac{\max(\chi^2_M - df_M, 0)}{\max(\chi^2_B - df_B, 0)}
+\qquad
+TLI = \frac{\chi^2_B/df_B - \chi^2_M/df_M}{\chi^2_B/df_B - 1}
+$$
+
+- **CFI** ranges from 0 to 1. Values ≥ .95 suggest good fit (≥ .90 acceptable).
+- **TLI** penalizes complexity (it uses χ²/df), can go above 1, and uses the same cutoffs.
+
+```{r}
+#| label: fit4a-measures
+fitMeasures(fit4a, c("chisq", "df", "pvalue", "cfi", "tli",
+                     "rmsea", "rmsea.ci.lower", "rmsea.ci.upper",
+                     "baseline.chisq", "baseline.df"))
+```
+
+For 4A: CFI = `r fm(fit4a, "cfi")` and TLI = `r fm(fit4a, "tli")`, both above .95.
+
+## RMSEA
+
+RMSEA is an *absolute* fit index that measures misfit per degree of freedom:
+
+$$
+RMSEA = \sqrt{\frac{\max(\chi^2_M - df_M, 0)}{df_M (N - 1)}}
+$$
+
+Rough guidelines: ≤ .05 close fit, .05–.08 reasonable, ≥ .10 poor. lavaan also gives a 90% confidence interval.
+
+For 4A: RMSEA = `r fm(fit4a, "rmsea")`, 90% CI [`r fm(fit4a, "rmsea.ci.lower")`, `r fm(fit4a, "rmsea.ci.upper")`]. With only 1 df, RMSEA is unstable and the CI is wide, so it isn't very informative here.
+
+**Overall verdict for Model 4A:** the χ² is significant, but it's inflated by N = 500. CFI and TLI are strong, and RMSEA is borderline with a very wide CI because df = 1. Taken together, the model reproduces the observed covariances fairly well, but the significant χ² and borderline RMSEA say there's a specific spot of misfit worth looking into, which leads to modification indices.
+
+## Saturated and Over-Identified Models
+
+Identification is about whether there's enough information (known values) to estimate the unknown parameters.
+
+$$
+df = \underbrace{\frac{p(p+1)}{2} \;(+\,p \text{ if means})}_{\text{known values}} - \text{free parameters}
+$$
+
+| Type | df | What it means |
+|---|---|---|
+| **Under-identified** | < 0 | More unknowns than knowns. No unique solution, so the model can't be estimated. |
+| **Just-identified** | = 0 | Exactly enough information. One unique solution, but the model reproduces S perfectly, so fit can't be tested. |
+| **Saturated** | = 0 | A just-identified model that estimates every possible relationship. Simple, multiple, and saturated multivariate regressions (1B, 2, 3E) are saturated. |
+| **Over-identified** | > 0 | More knowns than unknowns. Some parameters are fixed (usually to 0), which lets us test whether those restrictions hold. Models 3A, 3D, and 4A are over-identified. |
+
+Over-identified models are what we want in SEM, because the extra df are what make fit testing possible. Also, "saturated" doesn't mean unique: many different saturated models (with different arrows) fit the data equally perfectly.
+
+# Modification Indices
+
+## Interpreting Modification Indices
+
+```{r}
+#| label: mi-4a
+# Modification indices for the path model, largest first
+modindices(fit4a, sort = TRUE)
+```
+
+- **What an MI represents:** the approximate amount the model χ² would *drop* if one currently-fixed parameter were freed.
+- **Why 1 df:** each MI is about freeing exactly *one* parameter, so it's a 1-df χ² test. An MI above 3.84 means freeing that parameter would significantly improve fit at α = .05.
+- **Expected parameter change (EPC):** the `epc` column is the estimated value the parameter would take if it were freed. A big MI with a tiny EPC isn't very meaningful, and the `sepc.all` column shows the standardized version.
+
+Here the largest MI by far is `motiv ~ arith` (MI = `r { mi <- modindices(fit4a); round(mi$mi[mi$lhs=="motiv" & mi$op=="~" & mi$rhs=="arith"], 3) }`), meaning arithmetic would predict motivation. The seminar points out this suggestion is nonsense for this theory. Arithmetic scores can't plausibly cause motivation in this model, and adding it would create a feedback loop and leave negative df. The sensible candidate is **`arith ~ ppsych`** (MI = `r { mi <- modindices(fit4a); round(mi$mi[mi$lhs=="arith" & mi$op=="~" & mi$rhs=="ppsych"], 3) }`), because it's the one path we deliberately left out, and it's theoretically reasonable that negative parental psychology could affect arithmetic directly. Notice that `read ~ arith` and `read ~~ arith` have the *exact same* MI. Freeing any one of them would make the model saturated, so statistics alone can't choose among them. Theory has to.
+
+```{r}
+#| label: m4b
+# Model 4B: add the path suggested by the modification index
+m4b <- '
+  read  ~ 1 + ppsych + motiv
+  arith ~ 1 + motiv + read + ppsych   # new path
+'
+fit4b <- sem(m4b, data = dat)
+summary(fit4b, fit.measures = TRUE)
+
+# Chi-square difference test: 4A (restricted) vs. 4B (freer)
+anova(fit4b, fit4a)
+```
+
+The estimated `arith ~ ppsych` path is `r pe(fit4b, "arith", "~", "ppsych")`, very close to the EPC. The χ² drops by `r round(fm(fit4a, "chisq") - fm(fit4b, "chisq"), 3)`, close to the MI (the MI is an approximation, usually slightly off). Model 4B now has df = `r fm(fit4b, "df")`, so it's saturated, and there's nothing left to test.
+
+## Theoretical Justification
+
+A large MI is not permission to change the model. A few reasons:
+
+1. **MIs are purely statistical.** They don't know your theory. Some suggestions are causally backward (`motiv ~ arith`), and some just add correlated residuals that soak up misfit without explaining anything.
+2. **Capitalizing on chance.** Every time you free a parameter because the data said so, you're fitting the noise in *this* sample. The more data-driven changes you make, the less likely the model is to replicate in a new sample.
+3. **Overfitting.** Keep adding parameters and you'll always end up at a saturated model with perfect fit and zero df, which tells you nothing. Model 4B fits perfectly but can no longer be tested.
+4. **It turns confirmatory work into exploratory work.** If you revise a model based on MIs, you should say so and ideally confirm it on new data.
+
+So I treat MIs as **diagnostic information**. They point to where the model and the data disagree. Whether to act on that depends on whether there's a defensible theoretical reason for the new parameter, and any change should be reported as post hoc.
+
+# Measurement Model
+
+## Model Specification
+
+Before testing structural paths, I want to make sure the latent variables are measured well. First, the seminar's one-factor example:
+
+```{r}
+#| label: m5a
+# Model 5A: one-factor measurement model for risk (seminar version, verbal as marker)
+m5a <- 'risk =~ verbal + ses + ppsych'
+fit5a <- sem(m5a, data = dat)
+summary(fit5a, standardized = TRUE)
+```
+
+With 3 indicators: 6 knowns (3 variances + 3 covariances) and 6 free parameters (2 loadings, 3 residual variances, 1 factor variance), so df = `r fm(fit5a, "df")`. A three-indicator single factor is just-identified. Note that `ppsych` loads **negatively** (`r pe(fit5a, "risk", "=~", "ppsych")`) because `verbal` is the marker. With verbal first, higher "risk" scores actually mean *lower* risk.
+
+Now the full three-factor measurement model (a CFA):
+
+```{mermaid}
+flowchart TB
+  ADJ((adjust)) --> motiv[motiv] & harm[harm] & stabi[stabi]
+  RISK((risk)) --> ppsych[ppsych] & ses[ses] & verbal[verbal]
+  ACH((achieve)) --> read[read] & arith[arith] & spell[spell]
+  ADJ <-.-> RISK
+  RISK <-.-> ACH
+  ADJ <-.-> ACH
+```
+
+```{r}
+#| label: measurement-model
+measurement_model <- '
+  adjust  =~ motiv + harm + stabi      # Adjustment factor
+  risk    =~ ppsych + ses + verbal     # Risk factor (ppsych is the marker, so higher = more risk)
+  achieve =~ read + arith + spell      # Achievement factor
+'
+# cfa() correlates all latent factors by default
+fit_measurement <- cfa(measurement_model, data = dat)
+
+summary(fit_measurement, fit.measures = TRUE, standardized = TRUE)
+```
+
+- **Observed indicators:** `motiv`, `harm`, `stabi`, `ppsych`, `ses`, `verbal`, `read`, `arith`, `spell`.
+- **Latent factors:** `adjust`, `risk`, `achieve`. All three are exogenous here: they just covary with each other, with no regression paths.
+
+## Factor Loadings
+
+```{r}
+#| label: measurement-loadings
+# Standardized loadings for a cleaner read
+std_meas <- standardizedSolution(fit_measurement)
+std_meas[std_meas$op == "=~", c("lhs", "op", "rhs", "est.std", "pvalue")]
+```
+
+- **Meaning of a loading:** the unstandardized loading is the expected change in the indicator for a 1-unit change in the factor. The first indicator of each factor is fixed to 1 to give the factor its scale. The **standardized loading** (`Std.all`) is the correlation between the indicator and the factor, and squaring it gives the proportion of the indicator's variance explained by the factor.
+- All loadings are statistically significant. Standardized loadings range from about .56 (`ppsych`) to .94 (`read`) in absolute value. Achievement and Adjustment are measured very well, and Risk is the weakest factor, with its indicators sharing less variance.
+- Because `ppsych` is the marker for `risk`, **`ses` and `verbal` load negatively**: a higher risk score means more negative parental psychology, lower SES, and lower verbal IQ. That's the opposite of the seminar's sign convention (verbal as marker). It's just a different choice of scale. The fit is identical and only the signs flip.
+- **Residual variances** (the `.motiv`, `.read`, etc. rows) are the variance in each indicator *not* explained by its factor: measurement error plus unique variance. Their standardized versions equal 1 − (standardized loading)².
+
+## Model Fit
+
+```{r}
+#| label: measurement-fit
+fitMeasures(fit_measurement, c("chisq", "df", "pvalue", "cfi", "tli",
+                               "rmsea", "rmsea.ci.lower", "rmsea.ci.upper", "srmr"))
+```
+
+Knowns: 9 × 10 / 2 = 45. Free parameters: 6 loadings + 9 residual variances + 3 factor variances + 3 factor covariances = `r fm(fit_measurement, "npar")`. df = `r fm(fit_measurement, "df")`.
+
+- χ²(`r fm(fit_measurement, "df")`) = `r fm(fit_measurement, "chisq")`, p `r ifelse(fm(fit_measurement, "pvalue") < .001, "< .001", paste("=", fm(fit_measurement, "pvalue")))`: exact fit is rejected.
+- CFI = `r fm(fit_measurement, "cfi")`, TLI = `r fm(fit_measurement, "tli")`: right around the .95 / .90 range.
+- RMSEA = `r fm(fit_measurement, "rmsea")` [`r fm(fit_measurement, "rmsea.ci.lower")`, `r fm(fit_measurement, "rmsea.ci.upper")`]: above .08, so on the poor side.
+- SRMR = `r fm(fit_measurement, "srmr")`: good (below .08).
+
+**Verdict:** the evidence is mixed. Loadings are strong and SRMR is low, so the average residual is small. But the significant χ², CFI/TLI near the borderline, and an RMSEA around .10 suggest some covariances aren't being reproduced well. That might be a cross-loading or correlated residual the simple-structure model ignores. It's adequate for learning purposes, but in a real study I'd look at the residual matrix and modification indices (with theory in mind) before trusting the structural model built on top of it.
+
+## Measurement vs. Structural Model
+
+The measurement model only says *which indicators measure which factor* and lets every factor covary freely. It makes no claim about which construct causes which. The structural model replaces some of those factor covariances with directed regression paths (`achieve ~ adjust + risk`). That's the actual theoretical claim we care about.
+
+# Structural Regression Model
+
+## Model Specification
+
+**Model type:** structural regression model (Model 6A). Two *exogenous* latent variables (`adjust`, `risk`) predict one *endogenous* latent variable (`achieve`).
+
+$$
+\eta_1 = \gamma_{11}\xi_1 + \gamma_{12}\xi_2 + \zeta_1
+$$
+
+Here $\mathbf{B} = 0$ (no endogenous variable predicts another) and Γ is 1 × 2.
+
+```{mermaid}
+flowchart LR
+  motiv[motiv] & harm[harm] & stabi[stabi] --- ADJ((adjust))
+  ppsych[ppsych] & ses[ses] & verbal[verbal] --- RISK((risk))
+  ADJ == "γ₁₁" ==> ACH((achieve))
+  RISK == "γ₁₂" ==> ACH
+  ADJ <-. "φ₂₁" .-> RISK
+  ACH --- read[read] & arith[arith] & spell[spell]
+  Z((ζ₁)) --> ACH
+```
+
+```{r}
+#| label: structural-model
+structural_model <- '
+  # Measurement model
+  adjust  =~ motiv + harm + stabi
+  risk    =~ ppsych + ses + verbal
+  achieve =~ read + arith + spell
+
+  # Structural model
+  achieve ~ adjust + risk
+'
+fit_structural <- sem(structural_model, data = dat)
+
+summary(fit_structural, fit.measures = TRUE, standardized = TRUE)
+```
+
+## Direct Effects
+
+```{r}
+#| label: structural-paths
+std_str <- standardizedSolution(fit_structural)
+std_str[std_str$op %in% c("~", "~~") & std_str$lhs %in% c("achieve", "adjust", "risk") &
+          std_str$rhs %in% c("achieve", "adjust", "risk"),
+        c("lhs", "op", "rhs", "est.std", "pvalue")]
+```
+
+**Measurement relationships** (`=~`) are the same as in the CFA. Each loading tells us how well an indicator reflects its factor, and they barely change from the measurement model.
+
+**Structural relationships** (`~`) are the theoretical claims:
+
+- **Adjustment → Achievement:** unstandardized `r pe(fit_structural, "achieve", "~", "adjust")`, standardized `r pe(fit_structural, "achieve", "~", "adjust", "std.all")`. Controlling for risk, students with better adjustment (more motivation, harmony, and stability) have higher achievement. A 1-SD increase in adjustment predicts about a `r pe(fit_structural, "achieve", "~", "adjust", "std.all")`-SD increase in achievement.
+- **Risk → Achievement:** unstandardized `r pe(fit_structural, "achieve", "~", "risk")`, standardized `r pe(fit_structural, "achieve", "~", "risk", "std.all")`. Controlling for adjustment, higher risk (more negative parental psychology, lower SES, lower verbal IQ) predicts *lower* achievement. A 1-SD increase in risk predicts about a `r abs(pe(fit_structural, "achieve", "~", "risk", "std.all"))`-SD *decrease* in achievement. This is the stronger of the two effects.
+- **Covariance Adjustment ↔ Risk:** `r pe(fit_structural, "adjust", "~~", "risk")` (correlation = `r pe(fit_structural, "adjust", "~~", "risk", "std.all")`). Higher-risk students tend to be less well adjusted. This is an undirected association between the two exogenous factors.
+- **Residual variance of Achievement:** `.achieve` = `r pe(fit_structural, "achieve", "~~", "achieve")`, standardized `r pe(fit_structural, "achieve", "~~", "achieve", "std.all")`. So adjustment and risk together explain about **`r round((1 - pe(fit_structural, "achieve", "~~", "achieve", "std.all")) * 100, 1)`%** of the variance in achievement (R² = `r round(lavInspect(fit_structural, "r2")["achieve"], 3)`).
+
+(If I used the seminar's `verbal`-first ordering, the risk path would be positive, `+0.724` unstandardized / `+0.564` standardized, because "risk" would then be scaled toward *lower* risk. The magnitude and model fit are the same.)
+
+## Model Fit
+
+```{r}
+#| label: structural-fit
+fitMeasures(fit_structural, c("chisq", "df", "pvalue", "cfi", "tli",
+                              "rmsea", "rmsea.ci.lower", "rmsea.ci.upper", "srmr"))
+```
+
+The structural model has exactly the same fit as the measurement model: χ²(`r fm(fit_structural, "df")`) = `r fm(fit_structural, "chisq")`, CFI = `r fm(fit_structural, "cfi")`, TLI = `r fm(fit_structural, "tli")`, RMSEA = `r fm(fit_structural, "rmsea")`, SRMR = `r fm(fit_structural, "srmr")`. That's because the structural part is **saturated**: the three factor covariances in the CFA were simply swapped for two regression paths plus one covariance, still 3 parameters. So all the misfit lives in the measurement model, and the structural part can't be tested on its own here.
+
+## Indirect Effects
+
+**Model 6B: two endogenous latent variables.** Now risk predicts adjustment, and both predict achievement:
+
+$$
+\begin{aligned}
+\eta_1 \;(\text{adjust}) &= \gamma_{11}\xi_1 + \zeta_1 \\
+\eta_2 \;(\text{achieve}) &= \gamma_{21}\xi_1 + \beta_{21}\eta_1 + \zeta_2
+\end{aligned}
+$$
+
+- **Γ** holds paths from the exogenous latent variable (risk, ξ₁) to the endogenous ones: γ₁₁ (risk → adjust) and γ₂₁ (risk → achieve).
+- **B** holds paths *among* endogenous latent variables: β₂₁ (adjust → achieve). In Model 6A, B was 0. Here it has one nonzero element below the diagonal, and the diagonal is always 0.
+
+```{mermaid}
+flowchart LR
+  RISK((risk)) == "a  (γ₁₁)" ==> ADJ((adjust))
+  ADJ == "b  (β₂₁)" ==> ACH((achieve))
+  RISK == "c  (γ₂₁)" ==> ACH
+  Z1((ζ₁)) --> ADJ
+  Z2((ζ₂)) --> ACH
+```
+
+```{r}
+#| label: m6b
+m6b <- '
+  # Measurement model
+  adjust  =~ motiv + harm + stabi
+  risk    =~ ppsych + ses + verbal
+  achieve =~ read + arith + spell
+
+  # Structural model (labels a, b, c so we can build effects)
+  adjust  ~ a*risk               # Gamma: exogenous -> endogenous
+  achieve ~ c*risk + b*adjust    # Gamma (c) and B (b)
+
+  # Defined parameters
+  indirect := a*b                # risk -> adjust -> achieve
+  total    := c + a*b            # direct + indirect
+'
+fit6b <- sem(m6b, data = dat)
+summary(fit6b, fit.measures = TRUE, standardized = TRUE)
+```
+
+- **Risk → Adjustment (a):** `r pe(fit6b, "adjust", "~", "risk")` (std. `r pe(fit6b, "adjust", "~", "risk", "std.all")`). Higher risk predicts poorer adjustment.
+- **Adjustment → Achievement (b):** `r pe(fit6b, "achieve", "~", "adjust")` (std. `r pe(fit6b, "achieve", "~", "adjust", "std.all")`).
+- **Risk → Achievement, direct (c):** `r pe(fit6b, "achieve", "~", "risk")` (std. `r pe(fit6b, "achieve", "~", "risk", "std.all")`).
+- **Indirect effect (a × b):** `r pe(fit6b, "indirect", ":=", "a*b")` (std. `r pe(fit6b, "indirect", ":=", "a*b", "std.all")`), p < .001.
+- **Total effect (c + a × b):** `r pe(fit6b, "total", ":=", "c+a*b")` (std. `r pe(fit6b, "total", ":=", "c+a*b", "std.all")`).
+
+So part of risk's effect on achievement runs *through* adjustment: risk lowers adjustment, and lower adjustment means lower achievement. The rest is a direct effect. The fit (χ² = `r fm(fit6b, "chisq")`, df = `r fm(fit6b, "df")`) is identical to Model 6A, because 6A and 6B are **equivalent models**. Both are saturated in the structural part, so the data can't tell them apart. Choosing between "risk and adjustment just covary" and "risk causes adjustment" has to come from theory and study design, not fit. (In a real analysis I'd also bootstrap the indirect effect with `se = "bootstrap"`, since a × b usually isn't normally distributed.)
+
+### Model 6C: latent predictors of an observed outcome
+
+lavaan also makes it easy to regress an *observed* endogenous variable on latent variables, which classic LISREL notation doesn't allow directly:
+
+```{r}
+#| label: m6c
+m6c <- '
+  adjust =~ motiv + harm + stabi
+  risk   =~ ppsych + ses + verbal
+  adjust ~ risk
+  read   ~ adjust + risk   # observed outcome predicted by latent variables
+'
+fit6c <- sem(m6c, data = dat)
+summary(fit6c, standardized = TRUE)
+```
+
+Here `read ~ adjust` = `r pe(fit6c, "read", "~", "adjust")` and `read ~ risk` = `r pe(fit6c, "read", "~", "risk")`, with χ²(`r fm(fit6c, "df")`) = `r fm(fit6c, "chisq")`, CFI = `r fm(fit6c, "cfi")`, and RMSEA = `r fm(fit6c, "rmsea")`.
+
+## Model Interpretation
+
+Putting it together: in this (hypothetical) sample, both **adjustment** and **risk** are meaningful predictors of **academic achievement**. Risk (negative parental psychology, low SES, low verbal IQ) has the larger standardized effect, and it also seems to work partly through adjustment. Together they explain about `r round(lavInspect(fit_structural, "r2")["achieve"] * 100)`% of the variance in achievement. The structural conclusions rest on a measurement model whose fit is only borderline, though, so I'd treat these estimates as reasonable but not airtight.
+
+# Practice Questions and Answers
+
+**1. What is structural equation modeling?**
+
+SEM is a general statistical framework that estimates a system of linear equations at once. It can include observed and latent variables, regression paths, and covariances, and it tests a theory by comparing the model-implied covariance matrix Σ(θ̂) with the sample covariance matrix S.
+
+**2. Which statistical models can be treated as special cases of SEM?**
+
+Simple and multiple regression, multivariate regression, path analysis, confirmatory factor analysis, and structural regression models. In this note, Models 1–2 are regression, Model 3 is multivariate regression, Model 4 is path analysis, Model 5 and the three-factor CFA are measurement models, and Model 6 is a structural regression model.
+
+**3. What is the difference between an observed variable and a latent variable?**
+
+An observed variable is directly measured and appears as a column in the data, like `motiv`. A latent variable isn't measured directly but is inferred from the shared variance of several observed indicators, like `adjust`, which is measured by `motiv`, `harm`, and `stabi`.
+
+**4. What is the difference between an exogenous variable and an endogenous variable?**
+
+An exogenous variable isn't predicted by anything in the model, so no single-headed arrows point to it (`risk` in Model 6B). An endogenous variable is predicted by at least one other variable (`adjust` and `achieve` in Model 6B). Whether a variable is endogenous depends on the model: `adjust` is exogenous in Model 6A but endogenous in 6B.
+
+**5. What is the difference between a measurement model and a structural model?**
+
+The measurement model links latent variables to their indicators (`achieve =~ read + arith + spell`). The structural model specifies regression relationships among the latent variables (`achieve ~ adjust + risk`). The measurement model asks "are we measuring the constructs well?" and the structural model asks "how are the constructs related?"
+
+**6. What does the `~` operator mean in lavaan?**
+
+"Is regressed on." The outcome goes on the left and its predictors on the right. `read ~ motiv` estimates the regression coefficient of `read` on `motiv`. `~ 1` requests an intercept.
+
+**7. What does the `=~` operator mean?**
+
+"Is measured by." It defines a latent variable on the left with indicators on the right. `adjust =~ motiv + harm + stabi` estimates the factor loadings, with the first fixed to 1 by default.
+
+**8. What does the `~~` operator mean?**
+
+A variance (same variable on both sides, `motiv ~~ motiv`) or covariance (`ppsych ~~ motiv`). For endogenous variables, it refers to the residual variance or residual covariance.
+
+**9. What is the difference between a regression path and a factor loading?**
+
+Mathematically, both are regression coefficients. A **regression path** (`~`) is a theoretical claim that one construct predicts another (Γ or B). A **factor loading** (`=~`) describes how a latent construct shows up in an observed indicator (Λ). The direction of the arrow is from the factor to the indicator, because the construct is assumed to cause the responses.
+
+**10. What is the difference between a sample covariance matrix and a model-implied covariance matrix?**
+
+S is computed straight from the data with `cov(dat)`. Σ(θ̂) is the covariance matrix that the model's estimated parameters reproduce. You can see it with `fitted(fit)$cov`. Model fit is about how close the two are, and `resid(fit)$cov` shows the difference.
+
+**11. Why does the `cov()` function produce a sample covariance matrix rather than a population covariance matrix?**
+
+Because `dat` is a sample of 500 students, not the whole population. Anything computed from a sample is an estimate. `cov()` gives S (which is $\hat\Sigma$), and it uses the $N - 1$ denominator to make it an unbiased estimate of Σ. (lavaan's ML internally uses the $N$ denominator.)
+
+**12. What is the difference between multiple regression and multivariate regression?**
+
+Multiple regression has one outcome and several predictors (Model 2). Multivariate regression has *several outcomes* modeled at the same time (Model 3, with `read` and `arith`), and their residuals can covary. "Multivariate" refers to more than one endogenous variable, not more than one predictor.
+
+**13. Why are some models saturated?**
+
+A model is saturated when it estimates as many parameters as there are known values, so every variance and covariance is freely reproduced. Simple and multiple regression are always saturated because every predictor is connected to the outcome and every exogenous pair is allowed to covary. Model 3E and Model 4B became saturated once the last missing path was added.
+
+**14. What does it mean when a model has zero degrees of freedom?**
+
+The model is just-identified: there's exactly one solution, and it reproduces S perfectly (χ² = 0). There's no information left over to test fit, so we can interpret the estimates but can't evaluate whether the model is "right."
+
+**15. What does it mean when a model has negative degrees of freedom?**
+
+The model is under-identified: there are more free parameters than known values, so there are infinitely many solutions and lavaan can't estimate it. The fix is to add constraints (fix a loading to 1, fix a path to 0, set equality constraints) or remove parameters. This is why the seminar rejected the `motiv ~ arith` modification. Adding it would have overloaded the model.
+
+**16. What is the difference between the Γ and B matrices?**
+
+Γ (gamma) holds the paths from exogenous variables to endogenous variables. B (beta) holds the paths among endogenous variables. In Model 6B, risk → adjust and risk → achieve are in Γ, and adjust → achieve is in B. When B = 0, a path model reduces to multivariate regression.
+
+**17. What is a modification index?**
+
+It's the estimated decrease in the model χ² if one fixed parameter (usually a path or covariance fixed to 0) were freely estimated. It's a 1-df test, so values over 3.84 are significant at .05. lavaan reports it with `modindices()`, along with the expected parameter change (EPC).
+
+**18. Why should researchers not automatically follow modification-index recommendations?**
+
+Because MIs are purely data-driven. They can suggest paths that are causally backward or meaningless (`motiv ~ arith`), they capitalize on chance features of one sample, and following them repeatedly leads to overfitted, saturated models that won't replicate. Any change should be theoretically justified and reported as post hoc.
+
+**19. What is the difference between a direct effect and an indirect effect?**
+
+A direct effect is a single path from X to Y (risk → achieve, path c). An indirect effect is the part of X's effect that passes through a mediator, equal to the product of the paths along the way (risk → adjust → achieve, a × b = `r pe(fit6b, "indirect", ":=", "a*b")`). Total effect = direct + indirect.
+
+**20. Which paths in the structural model are theoretically most important?**
+
+The structural paths: adjust → achieve and risk → achieve (and risk → adjust in Model 6B). These carry the substantive hypothesis about what drives achievement. The loadings matter too, but mostly as a precondition, since the constructs have to be measured well before their relationships mean anything. Risk → achieve has the largest standardized effect (`r pe(fit_structural, "achieve", "~", "risk", "std.all")`).
+
+**21. How should the fit of the measurement model be evaluated?**
+
+Look at the overall pattern, not one number: χ² (and its sensitivity to N), CFI/TLI (≥ .95 good, ≥ .90 acceptable), RMSEA with its CI (≤ .06–.08), and SRMR (≤ .08). Also check that loadings are significant and reasonably large, that no residual variances are negative (Heywood cases), and that the residual matrix doesn't show big local misfits. Here the CFA had strong loadings and good SRMR but borderline CFI/TLI and a high RMSEA, so it's adequate at best.
+
+**22. How should the fit of the structural model be evaluated?**
+
+Fit the measurement model first, then compare the structural model against it. If the structural part is saturated (as in Models 6A/6B), the fit is identical and all misfit comes from measurement, so the structural paths can only be judged by their size, significance, and R². If the structural model adds restrictions (fixes some latent paths to 0), a χ² difference test against the CFA shows whether those restrictions hold.
+
+**23. What conclusions can be drawn from the standardized estimates?**
+
+Standardized estimates put everything on an SD scale, so effects can be compared. Risk has a larger standardized effect on achievement (`r pe(fit_structural, "achieve", "~", "risk", "std.all")`) than adjustment does (`r pe(fit_structural, "achieve", "~", "adjust", "std.all")`). Standardized loadings mostly above .6 show the indicators are decent measures. The standardized residual variance of achievement (`r pe(fit_structural, "achieve", "~~", "achieve", "std.all")`) means about `r round(lavInspect(fit_structural, "r2")["achieve"] * 100)`% of achievement's variance is explained.
+
+**24. What limitations should be considered when interpreting this SEM?**
+
+- The data are hypothetical and cross-sectional, so the arrows are theoretical, not proof of causation.
+- The measurement model fit is borderline (RMSEA ≈ .10), so the latent constructs may be misspecified.
+- Models 6A and 6B are equivalent, so the data can't tell us whether risk *causes* adjustment or the two just covary.
+- ML assumes multivariate normality. Non-normal data would call for robust estimation (`estimator = "MLR"`).
+- The indirect effect should be tested with bootstrapped confidence intervals.
+- Any model changes based on modification indices would need replication in a new sample.
+
+## Seminar Quiz Questions
+
+A few of the seminar's own true/false checks that I found helpful:
+
+- **Does `cov(dat)` give the population Σ?** False. It gives the sample S.
+- **Linear regression models are always saturated.** True. df = 0.
+- **lavaan's multivariate regression is equivalent to running separate regressions.** False by default, because of the residual covariance. It's only equivalent with `read ~~ 0*arith`.
+- **Γ is always square.** False. It's p × q (endogenous × exogenous).
+- **Over-identified models are good.** True. The extra df make fit testable.
+- **Each modification index is a 1-df chi-square test.** True.
+- **Two saturated models must have identical estimates.** False. Different saturated models can have different paths and estimates but identical (perfect) fit.
+- **The diagonal of B is always zero.** True. A variable can't predict itself.
+- **If B = 0 there are no structural paths.** False. Γ can still hold structural paths (Model 6A).
+- **Multivariate regression means more than one exogenous predictor.** False. It means more than one endogenous variable.
+
+# Summary of Important Lessons
+
+1. **SEM is an umbrella.** Regression, multivariate regression, path analysis, CFA, and structural regression are all special cases of the same framework.
+2. **Everything is about covariance matrices.** A model implies Σ(θ); fit asks how close Σ(θ̂) is to S.
+3. **lavaan syntax mirrors the path diagram.** `~` = single arrow (regression), `=~` = factor to indicators, `~~` = double arrow, `~ 1` = intercept.
+4. **Count your df.** Known values = p(p+1)/2 (+ p with means). df < 0 can't be estimated, df = 0 can't be tested, df > 0 is what makes fit testing possible.
+5. **ML and OLS give the same coefficients** in regression but slightly different residual variances (N vs. N − k − 1 denominator).
+6. **lavaan's defaults matter.** It adds residual covariances between endogenous outcomes in multivariate regression, correlates exogenous variables and latent factors, and fixes the first loading to 1.
+7. **Never judge fit by one number.** Use χ², CFI, TLI, RMSEA (with CI), and SRMR together, and remember χ² is inflated by large N.
+8. **Modification indices are diagnostics, not instructions.** Only free a parameter if theory supports it, and report the change as post hoc.
+9. **Check the measurement model before the structural model.** The structural results are only as trustworthy as the constructs underneath.
+10. **Equivalent models fit the same.** Fit can't establish causal direction. That has to come from theory and design.
+11. **Marker variable choice changes signs, not fit.** Using `ppsych` vs. `verbal` as the marker for risk flips the direction of the factor.
+
+# References
+
+Hu, Li-tze, and Peter M. Bentler. 1999. "Cutoff Criteria for Fit Indexes in Covariance Structure Analysis: Conventional Criteria Versus New Alternatives." *Structural Equation Modeling: A Multidisciplinary Journal* 6 (1): 1–55. https://doi.org/10.1080/10705519909540118.
+
+Kline, Rex B. 2016. *Principles and Practice of Structural Equation Modeling*. 4th ed. New York: Guilford Press.
+
+Rosseel, Yves. 2012. "lavaan: An R Package for Structural Equation Modeling." *Journal of Statistical Software* 48 (2): 1–36. https://doi.org/10.18637/jss.v048.i02.
+
+Rosseel, Yves. n.d. "The lavaan Tutorial." Accessed November 22, 2026. https://lavaan.ugent.be/tutorial/.
+
+UCLA Statistical Methods and Data Analytics. n.d. "Introduction to Structural Equation Modeling (SEM) in R with lavaan." Accessed October 4, 2026. https://stats.oarc.ucla.edu/r/seminars/rsem/.
+
+# Appendix: Publication Links
+
+- [GitHub Repository](https://github.com/rsabilla/structural-equation-modeling-in-r-study-note)
+- [GitHub Pages Website](https://rsabilla.github.io/structural-equation-modeling-in-r-study-note/structural-equation-modeling-in-r-study-note.html)
